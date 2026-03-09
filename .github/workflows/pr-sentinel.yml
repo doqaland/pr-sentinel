@@ -1,0 +1,67 @@
+# PR Sentinel — QA Review Action
+# Copy this file into your repo at .github/workflows/pr-sentinel.yml
+# Required secret: ANTHROPIC_API_KEY
+
+name: PR Sentinel — QA Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  qa-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch PR diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+
+      - name: Fetch PR metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr view ${{ github.event.pull_request.number }} \
+            --json title,body,labels,number > pr_meta.json
+
+      - name: Run QA analysis via Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          DIFF=$(cat pr.diff | head -c 12000)  # cap to stay within token limits
+          PR_META=$(cat pr_meta.json)
+          PROMPT=$(cat prompts/qa-review.md)
+
+          PAYLOAD=$(jq -n \
+            --arg prompt "$PROMPT" \
+            --arg meta "$PR_META" \
+            --arg diff "$DIFF" \
+            '{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1500,
+              messages: [{
+                role: "user",
+                content: ($prompt + "\n\n---\n\nPR METADATA:\n" + $meta + "\n\nDIFF:\n" + $diff)
+              }]
+            }')
+
+          curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$PAYLOAD" \
+            | jq -r '.content[0].text' > qa_report.md
+
+      - name: Post QA report as PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body-file qa_report.md

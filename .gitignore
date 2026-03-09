@@ -1,0 +1,8 @@
+# Runtime artifacts (generated during Action execution, not committed)
+pr.diff
+pr_meta.json
+qa_report.md
+
+# Local env
+.env
+*.local
