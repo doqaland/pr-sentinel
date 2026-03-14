@@ -1,0 +1,95 @@
+name: 'PR Sentinel — QA Review'
+description: 'AI-powered QA analysis on every pull request. Thinks like a QA engineer, not a code reviewer.'
+author: 'DoQALand'
+
+branding:
+  icon: 'shield'
+  color: 'orange'
+
+inputs:
+  anthropic-api-key:
+    description: 'Your Anthropic API key'
+    required: true
+  model:
+    description: 'Claude model to use'
+    required: false
+    default: 'claude-sonnet-4-6'
+  max-diff-chars:
+    description: 'Max characters of diff to analyze (prevents oversized API payloads)'
+    required: false
+    default: '12000'
+  max-tokens:
+    description: 'Max tokens for the Claude response'
+    required: false
+    default: '2048'
+
+outputs:
+  report-path:
+    description: 'Workspace-relative path to the generated QA report file'
+    value: ${{ steps.qa-analysis.outputs.report-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Fetch PR diff
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+
+    - name: Fetch PR metadata
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        gh pr view ${{ github.event.pull_request.number }} \
+          --json title,body,labels,number > pr_meta.json
+
+    - name: Run QA analysis
+      id: qa-analysis
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: |
+        set -euo pipefail
+        DIFF=$(head -c ${{ inputs.max-diff-chars }} pr.diff)
+        PR_META=$(cat pr_meta.json)
+        PROMPT=$(cat "${{ github.action_path }}/prompts/qa-review.md")
+
+        PAYLOAD=$(jq -n \
+          --arg prompt "$PROMPT" \
+          --arg meta "$PR_META" \
+          --arg diff "$DIFF" \
+          --arg model "${{ inputs.model }}" \
+          --argjson max_tokens ${{ inputs.max-tokens }} \
+          '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: ($prompt + "\n\n---\n\nPR METADATA:\n" + $meta + "\n\nDIFF:\n" + $diff)}]}')
+
+        RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
+          -H "x-api-key: $ANTHROPIC_API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -H "content-type: application/json" \
+          -d "$PAYLOAD")
+
+        if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+          echo "::error::Anthropic API error: $(echo "$RESPONSE" | jq -r '.error.message')"
+          exit 1
+        fi
+
+        echo "$RESPONSE" | jq -r '.content[0].text' > qa_report.md
+        echo "report-path=qa_report.md" >> "$GITHUB_OUTPUT"
+
+    - name: Post comment
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # Update the last PR Sentinel comment if one exists; otherwise create a new one.
+        # This prevents a new comment being posted on every synchronize event.
+        gh pr comment ${{ github.event.pull_request.number }} \
+          --edit-last --body-file qa_report.md 2>/dev/null || \
+        gh pr comment ${{ github.event.pull_request.number }} \
+          --body-file qa_report.md
