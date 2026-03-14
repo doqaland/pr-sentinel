@@ -2,7 +2,7 @@
 
 **The QA engineer's eye on every pull request — powered by Claude AI.**
 
-Built by [DoQALand](https://doqaland.com) · Open source · MIT License
+· Open source · MIT License
 
 ---
 
@@ -52,10 +52,10 @@ Value: your key from [console.anthropic.com](https://console.anthropic.com)
 mkdir -p .github/workflows prompts
 
 curl -o .github/workflows/pr-sentinel.yml \
-  https://raw.githubusercontent.com/doqaland/pr-sentinel/main/.github/workflows/pr-sentinel.yml
+  https://raw.githubusercontent.com/Anasss/pr-sentinel/main/.github/workflows/pr-sentinel.yml
 
 curl -o prompts/qa-review.md \
-  https://raw.githubusercontent.com/doqaland/pr-sentinel/main/prompts/qa-review.md
+  https://raw.githubusercontent.com/Anasss/pr-sentinel/main/prompts/qa-review.md
 ```
 
 ### 3. Open a PR
