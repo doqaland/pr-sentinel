@@ -22,6 +22,14 @@ inputs:
     description: 'Max tokens for the Claude response'
     required: false
     default: '2048'
+  context-file:
+    description: 'Path to a domain context file (Markdown) to inject into the prompt. E.g. context/qa-context.md'
+    required: false
+    default: ''
+  fetch-full-source:
+    description: 'Fetch full source of changed files to give Claude deeper context (max 10 files, 300 lines/file)'
+    required: false
+    default: 'false'
 
 outputs:
   report-path:
@@ -48,6 +56,38 @@ runs:
         gh pr view ${{ github.event.pull_request.number }} \
           --json title,body,labels,number > pr_meta.json
 
+    - name: Fetch full source of changed files
+      if: ${{ inputs.fetch-full-source == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # Collect changed file paths (exclude deletions and test files)
+        gh pr view ${{ github.event.pull_request.number }} \
+          --json files --jq '[.files[] | select(.status != "removed") | .path
+            | select(test("(test|spec|__tests__|__mocks__)" ; "i") | not)] | .[:10] | .[]' \
+          > changed_files.txt || true
+
+        echo "" > full_source.md
+        while IFS= read -r filepath; do
+          content=$(gh api "repos/${{ github.repository }}/contents/${filepath}?ref=${{ github.event.pull_request.head.sha }}" \
+            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | head -n 300 || true)
+          if [ -n "$content" ]; then
+            echo "### ${filepath}" >> full_source.md
+            echo '```' >> full_source.md
+            echo "$content" >> full_source.md
+            echo '```' >> full_source.md
+            echo "" >> full_source.md
+          fi
+          # Hard cap: stop if full_source.md exceeds 50 KB
+          size=$(wc -c < full_source.md)
+          if [ "$size" -gt 51200 ]; then
+            echo "_(source truncated at 50 KB)_" >> full_source.md
+            break
+          fi
+        done < changed_files.txt
+
     - name: Run QA analysis
       id: qa-analysis
       shell: bash
@@ -59,13 +99,31 @@ runs:
         PR_META=$(cat pr_meta.json)
         PROMPT=$(cat "${{ github.action_path }}/prompts/qa-review.md")
 
+        # Append optional domain context file
+        if [ -n "${{ inputs.context-file }}" ] && [ -f "${{ inputs.context-file }}" ]; then
+          DOMAIN_CONTEXT=$(cat "${{ inputs.context-file }}")
+          PROMPT="${PROMPT}
+
+---
+
+## Domain Context
+${DOMAIN_CONTEXT}"
+        fi
+
+        # Append full source if fetched
+        FULL_SOURCE=""
+        if [ -f full_source.md ] && [ -s full_source.md ]; then
+          FULL_SOURCE=$(cat full_source.md)
+        fi
+
         PAYLOAD=$(jq -n \
           --arg prompt "$PROMPT" \
           --arg meta "$PR_META" \
           --arg diff "$DIFF" \
+          --arg source "$FULL_SOURCE" \
           --arg model "${{ inputs.model }}" \
           --argjson max_tokens ${{ inputs.max-tokens }} \
-          '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: ($prompt + "\n\n---\n\nPR METADATA:\n" + $meta + "\n\nDIFF:\n" + $diff)}]}')
+          '{model: $model, max_tokens: $max_tokens, messages: [{role: "user", content: ($prompt + "\n\n---\n\nPR METADATA:\n" + $meta + "\n\nDIFF:\n" + $diff + (if $source != "" then "\n\nFULL SOURCE (changed files):\n" + $source else "" end))}]}')
 
         RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
           -H "x-api-key: $ANTHROPIC_API_KEY" \
